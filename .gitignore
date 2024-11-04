@@ -12,3 +12,4 @@
 *.a
 mkmf.log
 target/
+!lib/guest_distance_calculator/guest_distance_calculator.so
