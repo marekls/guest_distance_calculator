@@ -1,19 +1,19 @@
-use magnus::{function, prelude::*, Error, Ruby, Float};
 use lazy_static::lazy_static;
+use magnus::{function, prelude::*, Error, Ruby};
 use serde::Serialize;
-use std::collections::{HashSet, HashMap};
-use std::sync::Mutex;
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 const TRESHOLD: f64 = 2.0;
 const MATCHES_LIMIT: usize = 20;
 
 #[derive(Debug)]
 pub struct GuestDistanceCalculator {
-    data: Mutex<HashMap<String, HashMap<String, f64>>>, // guest_id -> thematic_id -> score
-    thematic_ids: Mutex<HashSet<String>>,               // Set to store unique thematic IDs
-    other_guest_ids: Mutex<HashSet<String>>,            // Set to store other guest IDs
-    thematics_count: Mutex<usize>,                      // Counter for total unique thematics
+    data: Mutex<HashMap<String, HashMap<String, f64>>>,
+    thematic_ids: Mutex<HashSet<String>>,
+    other_guest_ids: Mutex<HashSet<String>>,
+    thematics_count: Mutex<usize>,
 }
 
 impl GuestDistanceCalculator {
@@ -28,9 +28,7 @@ impl GuestDistanceCalculator {
 
     pub fn insert_score(&self, guest_id: String, thematic_id: String, score: f64) {
         let mut data = self.data.lock().unwrap();
-        data.entry(guest_id)
-            .or_insert_with(HashMap::new)
-            .insert(thematic_id, score);
+        data.entry(guest_id).or_default().insert(thematic_id, score);
     }
 
     pub fn insert_thematic_ids(&self, ids: Vec<String>) {
@@ -77,36 +75,42 @@ impl GuestDistanceCalculator {
         }
     }
 
-    pub fn sum_distances_on_all_thematics(&self, guest_a_id: String, guest_b_id: String) -> Option<TempDistance> {
+    pub fn sum_distances_on_all_thematics(
+        &self,
+        guest_a_id: String,
+        guest_b_id: String,
+    ) -> Option<Distance> {
         let total_distance = self.calculate_total_distance(guest_a_id.clone(), guest_b_id.clone());
 
         if total_distance > TRESHOLD {
             None
         } else {
-            Some(TempDistance::new(guest_a_id, guest_b_id, total_distance))
+            Some(Distance::new(guest_a_id, guest_b_id, total_distance))
         }
     }
 
-		pub fn calculate_distances(&self, guests_slice_ids: Vec<String>) -> Vec<TempDistance> {
-				let other_guest_ids = self.other_guest_ids.lock().unwrap();
+    pub fn calculate_distances(&self, guests_slice_ids: Vec<String>) -> Vec<Distance> {
+        let other_guest_ids = self.other_guest_ids.lock().unwrap();
 
-				// Collect distances for each g1_id, sort and truncate, then accumulate the results
-				let all_distances = guests_slice_ids.iter()
-						.flat_map(|g1_id| {
-								let mut distances = other_guest_ids.iter()
-										.filter_map(|g2_id| self.sum_distances_on_all_thematics(g1_id.clone(), g2_id.clone()))
-										.collect::<Vec<TempDistance>>();
+        let all_distances = guests_slice_ids
+            .iter()
+            .flat_map(|g1_id| {
+                let mut distances = other_guest_ids
+                    .iter()
+                    .filter_map(|g2_id| {
+                        self.sum_distances_on_all_thematics(g1_id.clone(), g2_id.clone())
+                    })
+                    .collect::<Vec<Distance>>();
 
-								// Sort and truncate this group for the current g1_id
-								distances.sort();
-								distances.truncate(MATCHES_LIMIT);
+                distances.sort();
+                distances.truncate(MATCHES_LIMIT);
 
-								distances.into_iter() // Return this group's distances for further accumulation
-						})
-						.collect::<Vec<TempDistance>>();
+                distances.into_iter()
+            })
+            .collect::<Vec<Distance>>();
 
-				all_distances
-		}
+        all_distances
+    }
 
     pub fn clear(&self) {
         let mut data = self.data.lock().unwrap();
@@ -121,7 +125,12 @@ impl GuestDistanceCalculator {
     }
 }
 
-// Struct to hold guest IDs and the distance between them, used for sorting
+impl Default for GuestDistanceCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Distance {
     guest_a_id: String,
@@ -139,54 +148,47 @@ impl Distance {
     }
 }
 
-// Implement PartialOrd and Ord for sorting by distance
 impl PartialOrd for Distance {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.distance.partial_cmp(&other.distance)
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for Distance {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        self.distance
+            .partial_cmp(&other.distance)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
 impl Eq for Distance {}
 
-// Initialize a global static instance of GuestDistanceCalculator, wrapped in a Mutex
 lazy_static! {
-    static ref CALCULATOR: GuestDistanceCalculator = GuestDistanceCalculator::new();
+    static ref CALCULATOR: GuestDistanceCalculator = GuestDistanceCalculator::default();
 }
 
-// Function to insert score, callable from Ruby
 fn insert_score(guest_id: String, thematic_id: String, score: f64) {
     CALCULATOR.insert_score(guest_id, thematic_id, score);
 }
 
-// Function to insert thematic IDs, callable from Ruby
 fn insert_thematic_ids(ids: Vec<String>) {
     CALCULATOR.insert_thematic_ids(ids);
 }
 
-// Function to insert other guest IDs, callable from Ruby
 fn insert_other_guest_ids(ids: Vec<String>) {
     CALCULATOR.insert_other_guest_ids(ids);
 }
 
-// Function to calculate distances, converting each TempDistance to a Ruby-compatible hash
 fn calculate_distances(guests_slice_ids: Vec<String>) -> String {
     let distances = CALCULATOR.calculate_distances(guests_slice_ids);
-    serde_json::to_string(&distances).unwrap() // Convert the distances to JSON string
+    serde_json::to_string(&distances).unwrap()
 }
 
-
-// Function to clear the cache, callable from Ruby
 fn clear() {
     CALCULATOR.clear();
 }
 
-// Initialization function to define the Ruby module and expose methods
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("GuestDistanceCalculator")?;
